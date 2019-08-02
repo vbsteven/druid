@@ -16,28 +16,39 @@
 
 use std::any::Any;
 
-pub use druid_shell::window::MouseButton;
+pub use druid_shell::keyboard::{KeyCode, KeyEvent, KeyModifiers};
+pub use druid_shell::window::{MouseButton, ScrollEvent};
 
-use {BoxConstraints, Geometry, LayoutResult};
-use {HandlerCtx, Id, LayoutCtx, PaintCtx};
+use crate::kurbo::{Point, Rect, Size};
+use crate::{BoxConstraints, LayoutResult};
+use crate::{HandlerCtx, Id, LayoutCtx, PaintCtx};
 
 mod button;
-pub use widget::button::{Button, Label};
+pub use crate::widget::button::{Button, Label};
 
 mod event_forwarder;
-pub use widget::event_forwarder::EventForwarder;
+pub use crate::widget::event_forwarder::EventForwarder;
 
 mod flex;
-pub use widget::flex::{Column, Flex, Row};
+pub use crate::widget::flex::{Column, Flex, Row};
 
 mod key_listener;
-pub use widget::key_listener::KeyListener;
+pub use crate::widget::key_listener::KeyListener;
 
 mod null;
-pub(crate) use widget::null::NullWidget;
+pub(crate) use crate::widget::null::NullWidget;
 
 mod padding;
-pub use widget::padding::Padding;
+pub use crate::widget::padding::Padding;
+
+mod textbox;
+pub use crate::widget::textbox::TextBox;
+
+mod slider;
+pub use crate::widget::slider::Slider;
+
+mod progress_bar;
+pub use crate::widget::progress_bar::ProgressBar;
 
 /// The trait implemented by all widgets.
 pub trait Widget {
@@ -46,7 +57,7 @@ pub trait Widget {
     /// The implementer is responsible for translating the coordinates as
     /// specified in the geometry.
     #[allow(unused)]
-    fn paint(&mut self, paint_ctx: &mut PaintCtx, geom: &Geometry) {}
+    fn paint(&mut self, paint_ctx: &mut PaintCtx, geom: &Rect) {}
 
     /// Participate in the layout protocol.
     ///
@@ -58,12 +69,12 @@ pub trait Widget {
         &mut self,
         bc: &BoxConstraints,
         children: &[Id],
-        size: Option<(f32, f32)>,
+        size: Option<Size>,
         ctx: &mut LayoutCtx,
     ) -> LayoutResult {
         if let Some(size) = size {
             // Maybe this is not necessary, rely on default value.
-            ctx.position_child(children[0], (0.0, 0.0));
+            ctx.position_child(children[0], Point::ORIGIN);
             LayoutResult::Size(size)
         } else {
             LayoutResult::RequestChild(children[0], *bc)
@@ -82,7 +93,7 @@ pub trait Widget {
     /// Sent to the active or hot widget on mouse move events.
     // TODO: should mods be plumbed here?
     #[allow(unused)]
-    fn mouse_moved(&mut self, x: f32, y: f32, ctx: &mut HandlerCtx) {}
+    fn mouse_moved(&mut self, pos: Point, ctx: &mut HandlerCtx) {}
 
     /// Sent to the widget when its "hot" status changes.
     #[allow(unused)]
@@ -91,7 +102,7 @@ pub trait Widget {
     /// An "escape hatch" of sorts for accessing widget state beyond the widget
     /// methods. Returns true if it is handled.
     #[allow(unused)]
-    fn poke(&mut self, payload: &mut Any, ctx: &mut HandlerCtx) -> bool {
+    fn poke(&mut self, payload: &mut dyn Any, ctx: &mut HandlerCtx) -> bool {
         false
     }
 
@@ -99,17 +110,18 @@ pub trait Widget {
     ///
     /// Key events are only sent to the focused widget.
     ///
-    /// Note that keys that are interpreted as characters are sent twice, first
-    /// as a `Vkey`, then as a `Char`.
-    ///
-    /// This is a fairly thin wrapper over WM messages. Keyboard input will be
-    /// changing quite a bit when IME is implemented.
-    ///
     /// Returns true if the event is handled.
     #[allow(unused)]
-    fn key(&mut self, event: &KeyEvent, ctx: &mut HandlerCtx) -> bool {
+    fn key_down(&mut self, event: &KeyEvent, ctx: &mut HandlerCtx) -> bool {
         false
     }
+
+    /// Sent to the widget when a key is released.
+    #[allow(unused)]
+    fn key_up(&mut self, event: &KeyEvent, ctx: &mut HandlerCtx) {}
+
+    #[allow(unused)]
+    fn scroll(&mut self, event: &ScrollEvent, ctx: &mut HandlerCtx) {}
 
     /// Called at the beginning of a new animation frame.
     ///
@@ -140,32 +152,20 @@ pub trait Widget {
     fn on_child_removed(&mut self, child: Id) {}
 }
 
+#[derive(Debug, Clone)]
+/// The state of the mouse for a click, mouse-up, or move event.
 pub struct MouseEvent {
-    /// X coordinate in px units, relative to top left of widget.
-    pub x: f32,
-    /// Y coordinate in px units, relative to top left of widget.
-    pub y: f32,
-    /// The modifiers, which have the same interpretation as the raw WM message.
-    ///
-    /// TODO: rationalize this with mouse mods.
-    pub mods: u32,
-    /// Which mouse button was pressed.
-    pub which: MouseButton,
+    /// The location of the mouse.
+    pub pos: Point,
+    /// The currently active modifiers.
+    pub mods: KeyModifiers,
+    /// Which mouse button was pressed or released.
+    pub button: MouseButton,
     /// Count of multiple clicks, is 0 for mouse up event.
+    ///
+    /// This is something that is handled by the operating system, based on the
+    /// user's settings. It is possible (such as on macOS) for you to receive
+    /// multiple events for a double-click; it will arrive first as a single-click
+    /// and then again as a double-click.
     pub count: u32,
-}
-
-#[derive(Clone)]
-pub struct KeyEvent {
-    pub key: KeyVariant,
-    /// The modifiers, a combinations of `M_ALT`, `M_CTRL`, `M_SHIFT`.
-    pub mods: u32,
-}
-
-#[derive(Clone)]
-pub enum KeyVariant {
-    /// A virtual-key code, same as WM_KEYDOWN message.
-    Vkey(i32),
-    /// A Unicode character.
-    Char(char),
 }

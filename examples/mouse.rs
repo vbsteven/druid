@@ -1,4 +1,4 @@
-// Copyright 2018 The xi-editor Authors.
+// Copyright 2019 The xi-editor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,34 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Example of animation frames.
+//! Sample GUI app.
 
-use druid::kurbo::{Line, Rect, Size, Vec2};
-use druid::piet::{Color, RenderContext};
+use druid::kurbo::{Point, Rect, Size};
+use druid::piet::{Color, FillRule, RenderContext};
+
 use druid::shell::{runloop, WindowBuilder};
-
-use druid::widget::Widget;
+use druid::widget::{ScrollEvent, Widget};
 use druid::{
-    BoxConstraints, HandlerCtx, Id, LayoutCtx, LayoutResult, MouseEvent, PaintCtx, Ui, UiMain,
-    UiState,
+    BoxConstraints, HandlerCtx, Id, LayoutCtx, LayoutResult, PaintCtx, Ui, UiMain, UiState,
 };
 
 const BG_COLOR: Color = Color::rgb24(0xfb_f8_ef);
+const MOUSE_BOX_COLOR: Color = Color::rgb24(0xb8_32_5a);
 
-/// A custom widget with animations.
-struct AnimWidget(f64);
+struct FooWidget {
+    pos: Point,
+    size: Size,
+}
 
-impl Widget for AnimWidget {
+impl Widget for FooWidget {
     fn paint(&mut self, paint_ctx: &mut PaintCtx, geom: &Rect) {
-        let fg = paint_ctx.render_ctx.solid_brush(BG_COLOR);
-        paint_ctx.render_ctx.stroke(
-            Line::new(
-                geom.origin(),
-                geom.origin() + Vec2::new(geom.width(), self.0 * geom.height()),
-            ),
+        paint_ctx.render_ctx.clear(BG_COLOR);
+
+        let fg = paint_ctx.render_ctx.solid_brush(MOUSE_BOX_COLOR);
+        let pos = self.pos + geom.origin().to_vec2();
+        paint_ctx.render_ctx.fill(
+            Rect::from_origin_size(pos, self.size),
             &fg,
-            1.0,
-            None,
+            FillRule::NonZero,
         );
     }
 
@@ -53,40 +54,41 @@ impl Widget for AnimWidget {
         LayoutResult::Size(bc.constrain((100.0, 100.0)))
     }
 
-    fn anim_frame(&mut self, interval: u64, ctx: &mut HandlerCtx) {
-        println!("anim frame, interval={}", interval);
-        if self.0 > 0.0 {
-            ctx.request_anim_frame();
-            self.0 = (self.0 - 1e-9 * (interval as f64)).max(0.0);
-        }
+    fn scroll(&mut self, event: &ScrollEvent, ctx: &mut HandlerCtx) {
+        self.size.width += event.dx as f64;
+        self.size.height += event.dy as f64;
         ctx.invalidate();
     }
 
-    fn mouse(&mut self, event: &MouseEvent, ctx: &mut HandlerCtx) -> bool {
-        if event.count > 0 {
-            self.0 = 1.0;
-            ctx.request_anim_frame();
-        }
-        true
+    fn mouse_moved(&mut self, pos: Point, ctx: &mut HandlerCtx) {
+        self.pos = pos;
+        ctx.invalidate();
     }
 }
 
-impl AnimWidget {
+impl FooWidget {
+    fn new() -> Self {
+        Self {
+            pos: Point::new(10.0, 10.0),
+            size: Size::new(40.0, 40.0),
+        }
+    }
+
     fn ui(self, ctx: &mut Ui) -> Id {
         ctx.add(self, &[])
     }
 }
 
 fn main() {
-    druid::shell::init();
+    druid_shell::init();
 
     let mut run_loop = runloop::RunLoop::new();
     let mut builder = WindowBuilder::new();
     let mut state = UiState::new();
-    let anim = AnimWidget(1.0).ui(&mut state);
-    state.set_root(anim);
+    let foo = FooWidget::new().ui(&mut state);
+    state.set_root(foo);
     builder.set_handler(Box::new(UiMain::new(state)));
-    builder.set_title("Animation example");
+    builder.set_title("Mouse example");
     let window = builder.build().unwrap();
     window.show();
     run_loop.run();

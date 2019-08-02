@@ -26,10 +26,10 @@ use winapi::um::shobjidl_core::*;
 use winapi::Interface;
 use wio::com::ComPtr;
 
+use crate::util::{as_result, FromWide};
+use crate::Error;
 use std::ffi::OsString;
 use std::ptr::null_mut;
-use util::{as_result, FromWide};
-use Error;
 
 /// Type of file dialog.
 pub enum FileDialogType {

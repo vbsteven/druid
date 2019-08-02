@@ -14,20 +14,9 @@
 
 //! Simple calculator.
 
-extern crate druid;
-extern crate druid_shell;
-
-use druid_shell::win_main;
-use druid_shell::platform::WindowBuilder;
-
+use druid::shell::{runloop, WindowBuilder};
 use druid::widget::{Button, Column, EventForwarder, KeyListener, Label, Padding, Row};
-use druid::{KeyEvent, KeyVariant, UiMain, UiState};
-
-use druid::Id;
-
-// TODO: Windows specific
-const VK_BACK: i32 = 0x08;
-const VK_RETURN: i32 = 0x0d;
+use druid::{Id, KeyCode, KeyEvent, UiMain, UiState};
 
 struct CalcState {
     /// The number displayed. Generally a valid float.
@@ -249,12 +238,14 @@ fn build_calc(ui: &mut UiState) {
 }
 
 fn action_for_key(event: &KeyEvent) -> Option<CalcAction> {
-    match event.key {
-        KeyVariant::Char(ch) => {
-            if ch >= '0' && ch <= '9' {
-                return Some(CalcAction::Digit(ch as u8 - b'0'));
-            }
+    eprintln!("{:?}", event);
+    match event {
+        e if e.key_code == KeyCode::Return => Some(CalcAction::Op('=')),
+        e if e.key_code == KeyCode::Backspace => Some(CalcAction::Op('⌫')),
+        e if e.key_code.is_printable() => {
+            let ch = e.text().and_then(|s| s.chars().next()).unwrap_or('\u{0}');
             match ch {
+                '0'..='9' => Some(CalcAction::Digit(ch as u8 - b'0')),
                 '.' | '+' | '=' | 'c' | 'C' => Some(CalcAction::Op(ch)),
                 '-' => Some(CalcAction::Op('−')),
                 '*' => Some(CalcAction::Op('×')),
@@ -262,24 +253,20 @@ fn action_for_key(event: &KeyEvent) -> Option<CalcAction> {
                 _ => None,
             }
         }
-        KeyVariant::Vkey(vk) => match vk {
-            VK_BACK => Some(CalcAction::Op('⌫')),
-            VK_RETURN => Some(CalcAction::Op('=')),
-            _ => None,
-        },
+        _ => None,
     }
 }
 
 fn main() {
     druid_shell::init();
 
-    let mut run_loop = win_main::RunLoop::new();
+    let mut run_loop = runloop::RunLoop::new();
     let mut builder = WindowBuilder::new();
     let mut state = UiState::new();
     build_calc(&mut state);
     builder.set_handler(Box::new(UiMain::new(state)));
     builder.set_title("Calculator");
-    let window = builder.build().unwrap();
+    let window = builder.build().expect("built window");
     window.show();
     run_loop.run();
 }

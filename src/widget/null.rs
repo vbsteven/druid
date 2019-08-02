@@ -16,13 +16,12 @@
 
 use std::any::Any;
 
-use widget::Widget;
-use HandlerCtx;
+use crate::{widget::Widget, HandlerCtx};
 
 pub struct NullWidget;
 
 impl Widget for NullWidget {
-    fn poke(&mut self, _payload: &mut Any, _ctx: &mut HandlerCtx) -> bool {
+    fn poke(&mut self, _payload: &mut dyn Any, _ctx: &mut HandlerCtx) -> bool {
         eprintln!("Poke to null widget: probable use-after-free");
         true
     }

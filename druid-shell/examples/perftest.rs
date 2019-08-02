@@ -12,26 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-extern crate druid_shell;
-extern crate kurbo;
-extern crate piet;
-extern crate piet_common;
-extern crate time;
-
 use std::any::Any;
 use std::cell::RefCell;
 
 use time::get_time;
 
-use kurbo::{Line, Rect};
-use piet::{FillRule, FontBuilder, RenderContext, Text, TextLayoutBuilder};
+use piet_common::kurbo::{Line, Rect};
+use piet_common::{Color, FillRule, FontBuilder, Piet, RenderContext, Text, TextLayoutBuilder};
 
 #[cfg(target_os = "windows")]
 use druid_shell::platform::PresentStrategy;
 
+use druid_shell::keyboard::KeyEvent;
 use druid_shell::platform::WindowBuilder;
-use druid_shell::win_main;
+use druid_shell::runloop;
 use druid_shell::window::{WinHandler, WindowHandle};
+
+const BG_COLOR: Color = Color::rgb24(0x27_28_22);
+const FG_COLOR: Color = Color::rgb24(0xf0_f0_ea);
 
 struct PerfTest(RefCell<PerfState>);
 
@@ -46,11 +44,11 @@ impl WinHandler for PerfTest {
         self.0.borrow_mut().handle = handle.clone();
     }
 
-    fn paint(&self, rc: &mut piet_common::Piet) -> bool {
+    fn paint(&self, rc: &mut Piet) -> bool {
         let mut state = self.0.borrow_mut();
         let (width, height) = state.size;
-        let bg = rc.solid_brush(0x272822ff).unwrap();
-        let fg = rc.solid_brush(0xf0f0eaff).unwrap();
+        let bg = rc.solid_brush(BG_COLOR);
+        let fg = rc.solid_brush(FG_COLOR);
         let rect = Rect::new(0.0, 0.0, width, height);
         rc.fill(rect, &bg, FillRule::NonZero);
 
@@ -96,7 +94,7 @@ impl WinHandler for PerfTest {
         let x0 = 210.0;
         let y0 = 10.0;
         for i in 0..60 {
-            let y = y0 + (i as f32) * dy;
+            let y = y0 + (i as f64) * dy;
             rc.draw_text(&layout, (x0, y), &fg);
         }
 
@@ -110,12 +108,8 @@ impl WinHandler for PerfTest {
         }
     }
 
-    fn char(&self, ch: u32, mods: u32) {
-        println!("got char 0x{:x} {:02x}", ch, mods);
-    }
-
-    fn keydown(&self, vk_code: i32, mods: u32) -> bool {
-        println!("got key code 0x{:x} {:02x}", vk_code, mods);
+    fn key_down(&self, event: KeyEvent) -> bool {
+        println!("keydown: {:?}", event);
         false
     }
 
@@ -129,10 +123,10 @@ impl WinHandler for PerfTest {
     }
 
     fn destroy(&self) {
-        win_main::request_quit();
+        runloop::request_quit();
     }
 
-    fn as_any(&self) -> &Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 }
@@ -140,7 +134,7 @@ impl WinHandler for PerfTest {
 fn main() {
     druid_shell::init();
 
-    let mut run_loop = win_main::RunLoop::new();
+    let mut run_loop = runloop::RunLoop::new();
     let mut builder = WindowBuilder::new();
     let perf_state = PerfState {
         size: Default::default(),

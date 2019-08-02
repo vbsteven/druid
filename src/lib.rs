@@ -14,33 +14,34 @@
 
 //! Simple entity-component-system based GUI.
 
-extern crate druid_shell;
-extern crate kurbo;
-extern crate piet;
-extern crate piet_common;
+pub use druid_shell::{self as shell, kurbo, piet};
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::char;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::time::Instant;
 
-use piet::RenderContext;
+use kurbo::{Point, Rect, Size, Vec2};
+use piet::{Color, Piet, RenderContext};
 
 use druid_shell::application::Application;
 pub use druid_shell::dialog::{FileDialogOptions, FileDialogType};
-use druid_shell::window::{self, MouseType, WinHandler, WindowHandle};
+pub use druid_shell::keyboard::{KeyCode, KeyEvent, KeyModifiers};
 use druid_shell::platform::IdleHandle;
+use druid_shell::window::{self, WinHandler, WindowHandle};
 
 mod graph;
 pub mod widget;
 
 use graph::Graph;
 use widget::NullWidget;
-pub use widget::{KeyEvent, KeyVariant, MouseEvent, Widget};
+pub use widget::{MouseEvent, Widget};
+
+//FIXME: this should come from a theme or environment at some point.
+const BACKGROUND_COLOR: Color = Color::rgb24(0x27_28_22);
 
 /// The top-level handler for the UI.
 ///
@@ -57,9 +58,9 @@ pub struct UiMain {
 pub type Id = usize;
 
 pub struct UiState {
-    listeners: BTreeMap<Id, Vec<Box<FnMut(&mut Any, ListenerCtx)>>>,
+    listeners: BTreeMap<Id, Vec<Box<dyn FnMut(&mut dyn Any, ListenerCtx)>>>,
 
-    command_listener: Option<Box<FnMut(u32, ListenerCtx)>>,
+    command_listener: Option<Box<dyn FnMut(u32, ListenerCtx)>>,
 
     /// The widget tree and associated state is split off into a separate struct
     /// so that we can use a mutable reference to it as the listener context.
@@ -73,7 +74,7 @@ pub type UiInner = Ui;
 /// The main access point for manipulating the UI.
 pub struct Ui {
     /// The individual widget trait objects.
-    widgets: Vec<Box<Widget>>,
+    widgets: Vec<Box<dyn Widget>>,
 
     /// Graph of widgets (actually a strict tree structure, so maybe should be renamed).
     graph: Graph,
@@ -88,7 +89,7 @@ pub struct LayoutCtx {
     handle: WindowHandle,
 
     /// Bounding box of each widget. The position is relative to the parent.
-    geom: Vec<Geometry>,
+    geom: Vec<Rect>,
 
     /// Additional state per widget.
     ///
@@ -115,15 +116,11 @@ pub struct LayoutCtx {
     hot: Option<Id>,
 
     /// The size of the paint surface
-    size: (f32, f32),
+    size: Size,
 }
 
-#[derive(Default, Clone, Copy)]
-pub struct Geometry {
-    // Maybe PointF is a better type, then we could use the math from direct2d?
-    pub pos: (f32, f32),
-    pub size: (f32, f32),
-}
+#[deprecated(note = "please use `Rect` directly.")]
+pub type Geometry = Rect;
 
 #[derive(Default)]
 struct PerWidgetState {
@@ -137,25 +134,23 @@ enum AnimState {
     AnimFrameRequested,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct BoxConstraints {
-    min_width: f32,
-    max_width: f32,
-    min_height: f32,
-    max_height: f32,
+    min: Size,
+    max: Size,
 }
 
 pub enum LayoutResult {
-    Size((f32, f32)),
+    Size(Size),
     RequestChild(Id, BoxConstraints),
 }
 
 enum Event {
     /// Event to be delivered to listeners.
-    Event(Id, Box<Any>),
+    Event(Id, Box<dyn Any>),
 
     /// A request to add a listener.
-    AddListener(Id, Box<FnMut(&mut Any, ListenerCtx)>),
+    AddListener(Id, Box<dyn FnMut(&mut dyn Any, ListenerCtx)>),
 
     /// Sent when a widget is removed so its listeners can be deleted.
     ClearListeners(Id),
@@ -184,7 +179,8 @@ pub struct PaintCtx<'a, 'b: 'a> {
     // TODO: maybe this should be a 3-way enum: normal/hot/active
     is_active: bool,
     is_hot: bool,
-    pub render_ctx: &'a mut piet_common::Piet<'b>,
+    is_focused: bool,
+    pub render_ctx: &'a mut Piet<'b>,
 }
 
 #[derive(Debug)]
@@ -195,15 +191,6 @@ pub enum Error {
 impl From<druid_shell::Error> for Error {
     fn from(e: druid_shell::Error) -> Error {
         Error::ShellError(e)
-    }
-}
-
-impl Geometry {
-    fn offset(&self, offset: (f32, f32)) -> Geometry {
-        Geometry {
-            pos: (self.pos.0 + offset.0, self.pos.1 + offset.1),
-            size: self.size,
-        }
     }
 }
 
@@ -244,7 +231,7 @@ impl UiState {
                     focused: None,
                     active: None,
                     hot: None,
-                    size: (0.0, 0.0),
+                    size: Size::ZERO,
                 },
             },
         }
@@ -258,51 +245,43 @@ impl UiState {
         self.command_listener = Some(Box::new(f));
     }
 
-    fn mouse(&mut self, x: f32, y: f32, raw_event: &window::MouseEvent) {
+    fn mouse(&mut self, pos: Point, raw_event: &window::MouseEvent) {
         fn dispatch_mouse(
-            widgets: &mut [Box<Widget>],
+            widgets: &mut [Box<dyn Widget>],
             node: Id,
-            x: f32,
-            y: f32,
+            pos: Point,
             raw_event: &window::MouseEvent,
             ctx: &mut HandlerCtx,
         ) -> bool {
-            let count = if raw_event.ty == MouseType::Down {
-                1
-            } else {
-                0
-            };
             let event = MouseEvent {
-                x,
-                y,
+                pos,
                 mods: raw_event.mods,
-                which: raw_event.which,
-                count,
+                button: raw_event.button,
+                count: raw_event.count,
             };
             widgets[node].mouse(&event, ctx)
         }
 
         fn mouse_rec(
-            widgets: &mut [Box<Widget>],
+            widgets: &mut [Box<dyn Widget>],
             graph: &Graph,
-            x: f32,
-            y: f32,
+            pos: Point,
             raw_event: &window::MouseEvent,
             ctx: &mut HandlerCtx,
         ) -> bool {
             let node = ctx.id;
             let g = ctx.layout_ctx.geom[node];
-            let x = x - g.pos.0;
-            let y = y - g.pos.1;
+            let Vec2 { x, y } = pos - g.origin();
+            let Size { width, height } = g.size();
             let mut handled = false;
-            if x >= 0.0 && y >= 0.0 && x < g.size.0 && y < g.size.1 {
-                handled = dispatch_mouse(widgets, node, x, y, raw_event, ctx);
+            if x >= 0.0 && y >= 0.0 && x < width && y < height {
+                handled = dispatch_mouse(widgets, node, Point::new(x, y), raw_event, ctx);
                 for child in graph.children[node].iter().rev() {
                     if handled {
                         break;
                     }
                     ctx.id = *child;
-                    handled = mouse_rec(widgets, graph, x, y, raw_event, ctx);
+                    handled = mouse_rec(widgets, graph, Point::new(x, y), raw_event, ctx);
                 }
             }
             handled
@@ -310,12 +289,11 @@ impl UiState {
 
         if let Some(active) = self.layout_ctx.active {
             // Send mouse event directly to active widget.
-            let (x, y) = self.xy_to_local(active, x, y);
+            let pos = pos - self.offset_of_widget(active);
             dispatch_mouse(
                 &mut self.inner.widgets,
                 active,
-                x,
-                y,
+                pos,
                 raw_event,
                 &mut HandlerCtx {
                     id: active,
@@ -326,8 +304,7 @@ impl UiState {
             mouse_rec(
                 &mut self.inner.widgets,
                 &self.inner.graph,
-                x,
-                y,
+                pos,
                 raw_event,
                 &mut HandlerCtx {
                     id: self.inner.graph.root,
@@ -338,17 +315,16 @@ impl UiState {
         self.dispatch_events();
     }
 
-    fn mouse_move(&mut self, x: f32, y: f32) {
+    fn mouse_move(&mut self, pos: Point) {
         // Note: this logic is similar to that for hit testing on mouse, but is
         // slightly different if child geom's overlap. Maybe we reconcile them,
         // maybe it's fine.
         let mut node = self.graph.root;
         let mut new_hot = None;
-        let (mut tx, mut ty) = (x, y);
+        let mut tpos = pos;
         loop {
             let g = self.layout_ctx.geom[node];
-            tx -= g.pos.0;
-            ty -= g.pos.1;
+            tpos -= g.origin().to_vec2();
             if self.graph.children[node].is_empty() {
                 new_hot = Some(node);
                 break;
@@ -356,9 +332,12 @@ impl UiState {
             let mut child_hot = None;
             for child in self.graph.children[node].iter().rev() {
                 let child_g = self.layout_ctx.geom[*child];
-                let cx = tx - child_g.pos.0;
-                let cy = ty - child_g.pos.1;
-                if cx >= 0.0 && cy >= 0.0 && cx < child_g.size.0 && cy < child_g.size.1 {
+                let cpos = tpos - child_g.origin();
+                let Size { width, height } = child_g.size();
+
+                //FIXME: when kurbo 0.3.2 lands, we can write:
+                // if child_g.with_origin(Point::ORIGIN).contains(cpos)
+                if cpos.x >= 0.0 && cpos.y >= 0.0 && cpos.x < width && cpos.y < height {
                     child_hot = Some(child);
                     break;
                 }
@@ -393,10 +372,9 @@ impl UiState {
         }
 
         if let Some(node) = self.layout_ctx.active.or(new_hot) {
-            let (x, y) = self.xy_to_local(node, x, y);
+            let pos = pos - self.offset_of_widget(node);
             self.inner.widgets[node].mouse_moved(
-                x,
-                y,
+                pos,
                 &mut HandlerCtx {
                     id: node,
                     layout_ctx: &mut self.inner.layout_ctx,
@@ -406,19 +384,41 @@ impl UiState {
         self.dispatch_events();
     }
 
-    fn handle_key_event(&mut self, event: &KeyEvent) -> bool {
+    fn handle_key_down(&mut self, event: &KeyEvent) -> bool {
         if let Some(id) = self.layout_ctx.focused {
             let handled = {
                 let mut ctx = HandlerCtx {
                     id,
                     layout_ctx: &mut self.inner.layout_ctx,
                 };
-                self.inner.widgets[id].key(event, &mut ctx)
+                self.inner.widgets[id].key_down(event, &mut ctx)
             };
             self.dispatch_events();
             handled
         } else {
             false
+        }
+    }
+
+    fn handle_key_up(&mut self, event: &KeyEvent) {
+        if let Some(id) = self.layout_ctx.focused {
+            let mut ctx = HandlerCtx {
+                id,
+                layout_ctx: &mut self.inner.layout_ctx,
+            };
+            self.inner.widgets[id].key_up(event, &mut ctx);
+            self.dispatch_events();
+        }
+    }
+
+    fn handle_scroll(&mut self, event: &window::ScrollEvent) {
+        if let Some(id) = self.layout_ctx.hot {
+            let mut ctx = HandlerCtx {
+                id,
+                layout_ctx: &mut self.inner.layout_ctx,
+            };
+            self.inner.widgets[id].scroll(event, &mut ctx);
+            self.dispatch_events();
         }
     }
 
@@ -491,29 +491,20 @@ impl UiState {
         self.dispatch_events();
     }
 
-    /// Translate coordinates to local coordinates of widget
-    fn xy_to_local(&mut self, mut node: Id, mut x: f32, mut y: f32) -> (f32, f32) {
+    /// Returns a `Vec2` representing the position of this node relative
+    /// to the origin.
+    fn offset_of_widget(&mut self, mut node: Id) -> Vec2 {
+        let mut delta = Vec2::default();
         loop {
             let g = self.layout_ctx.geom[node];
-            x -= g.pos.0;
-            y -= g.pos.1;
+            delta += g.origin().to_vec2();
             let parent = self.graph.parent[node];
             if parent == node {
                 break;
             }
             node = parent;
         }
-        (x, y)
-    }
-}
-
-fn clamp(val: f32, min: f32, max: f32) -> f32 {
-    if val < min {
-        min
-    } else if val > max {
-        max
-    } else {
-        val
+        delta
     }
 }
 
@@ -579,7 +570,7 @@ impl Ui {
         A: Any,
         F: FnMut(&mut A, ListenerCtx) + 'static,
     {
-        let wrapper: Box<FnMut(&mut Any, ListenerCtx)> = Box::new(move |a, ctx| {
+        let wrapper: Box<dyn FnMut(&mut dyn Any, ListenerCtx)> = Box::new(move |a, ctx| {
             if let Some(arg) = a.downcast_mut() {
                 f(arg, ctx)
             } else {
@@ -622,7 +613,12 @@ impl Ui {
     /// The id of the child may be reused; callers should take care not to use the
     /// child id in any way afterwards.
     pub fn delete_child(&mut self, node: Id, child: Id) {
-        fn delete_rec(widgets: &mut [Box<Widget>], q: &mut Vec<Event>, graph: &Graph, node: Id) {
+        fn delete_rec(
+            widgets: &mut [Box<dyn Widget>],
+            q: &mut Vec<Event>,
+            graph: &Graph,
+            node: Id,
+        ) {
             widgets[node] = Box::new(NullWidget);
             q.push(Event::ClearListeners(node));
             for &child in &graph.children[node] {
@@ -642,33 +638,39 @@ impl Ui {
     // The following methods are really UiState methods, but don't need access to listeners
     // so are more concise to implement here.
 
-    fn paint(&mut self, render_ctx: &mut piet_common::Piet, root: Id) {
+    fn paint(&mut self, render_ctx: &mut Piet, root: Id) {
         // Do pre-order traversal on graph, painting each node in turn.
         //
         // Implemented as a recursion, but we could use an explicit queue instead.
         fn paint_rec(
-            widgets: &mut [Box<Widget>],
+            widgets: &mut [Box<dyn Widget>],
             graph: &Graph,
-            geom: &[Geometry],
+            geom: &[Rect],
             paint_ctx: &mut PaintCtx,
             node: Id,
-            pos: (f32, f32),
+            pos: Point,
             active: Option<Id>,
             hot: Option<Id>,
+            focused: Option<Id>,
         ) {
-            let g = geom[node].offset(pos);
+            let g = geom[node] + pos.to_vec2();
             paint_ctx.is_active = active == Some(node);
             paint_ctx.is_hot = hot == Some(node) && (paint_ctx.is_active || active.is_none());
+            paint_ctx.is_focused = focused == Some(node);
             widgets[node].paint(paint_ctx, &g);
             for &child in &graph.children[node] {
-                paint_rec(widgets, graph, geom, paint_ctx, child, g.pos, active, hot);
+                let pos = g.origin();
+                paint_rec(
+                    widgets, graph, geom, paint_ctx, child, pos, active, hot, focused,
+                );
             }
         }
 
         let mut paint_ctx = PaintCtx {
             is_active: false,
             is_hot: false,
-            render_ctx: render_ctx,
+            is_focused: false,
+            render_ctx,
         };
         paint_rec(
             &mut self.widgets,
@@ -676,26 +678,27 @@ impl Ui {
             &self.layout_ctx.geom,
             &mut paint_ctx,
             root,
-            (0.0, 0.0),
+            Point::ORIGIN,
             self.layout_ctx.active,
             self.layout_ctx.hot,
+            self.layout_ctx.focused,
         );
     }
 
     fn layout(&mut self, bc: &BoxConstraints, root: Id) {
         fn layout_rec(
-            widgets: &mut [Box<Widget>],
+            widgets: &mut [Box<dyn Widget>],
             ctx: &mut LayoutCtx,
             graph: &Graph,
             bc: &BoxConstraints,
             node: Id,
-        ) -> (f32, f32) {
+        ) -> Size {
             let mut size = None;
             loop {
                 let layout_res = widgets[node].layout(bc, &graph.children[node], size, ctx);
                 match layout_res {
                     LayoutResult::Size(size) => {
-                        ctx.geom[node].size = size;
+                        ctx.geom[node] = ctx.geom[node].with_size(size);
                         return size;
                     }
                     LayoutResult::RequestChild(child, child_bc) => {
@@ -716,30 +719,39 @@ impl Ui {
 }
 
 impl BoxConstraints {
-    pub fn tight(size: (f32, f32)) -> BoxConstraints {
+    pub fn new(min: Size, max: Size) -> BoxConstraints {
+        BoxConstraints { min, max }
+    }
+
+    pub fn tight(size: Size) -> BoxConstraints {
         BoxConstraints {
-            min_width: size.0,
-            max_width: size.0,
-            min_height: size.1,
-            max_height: size.1,
+            min: size,
+            max: size,
         }
     }
 
-    pub fn constrain(&self, size: (f32, f32)) -> (f32, f32) {
-        (
-            clamp(size.0, self.min_width, self.max_width),
-            clamp(size.1, self.min_height, self.max_height),
-        )
+    pub fn constrain(&self, size: impl Into<Size>) -> Size {
+        size.into().clamp(self.min, self.max)
+    }
+
+    /// Returns the max size of these constraints.
+    pub fn max(&self) -> Size {
+        self.max
+    }
+
+    /// Returns the min size of these constraints.
+    pub fn min(&self) -> Size {
+        self.min
     }
 }
 
 impl LayoutCtx {
-    pub fn position_child(&mut self, child: Id, pos: (f32, f32)) {
-        self.geom[child].pos = pos;
+    pub fn position_child(&mut self, child: Id, pos: impl Into<Point>) {
+        self.geom[child] = self.geom[child].with_origin(pos.into());
     }
 
-    pub fn get_child_size(&self, child: Id) -> (f32, f32) {
-        self.geom[child].size
+    pub fn get_child_size(&self, child: Id) -> Size {
+        self.geom[child].size()
     }
 
     /// Internal logic for widget invalidation.
@@ -783,9 +795,18 @@ impl<'a> HandlerCtx<'a> {
         self.layout_ctx.active = if active { Some(self.id) } else { None };
     }
 
+    pub fn set_focused(&mut self, focused: bool) {
+        self.layout_ctx.focused = if focused { Some(self.id) } else { None };
+    }
+
     /// Determine whether this widget is active.
     pub fn is_active(&self) -> bool {
         self.layout_ctx.active == Some(self.id)
+    }
+
+    /// Determine whether this widget is focused.
+    pub fn is_focused(&self) -> bool {
+        self.layout_ctx.focused == Some(self.id)
     }
 
     /// Determine whether this widget is hot. A widget can be both hot and active, but
@@ -810,6 +831,10 @@ impl<'a> HandlerCtx<'a> {
             }
             _ => (),
         }
+    }
+
+    pub fn get_geom(&self) -> &Rect {
+        &self.layout_ctx.geom[self.id]
     }
 }
 
@@ -870,6 +895,11 @@ impl<'a, 'b> PaintCtx<'a, 'b> {
     pub fn is_hot(&self) -> bool {
         self.is_hot
     }
+
+    /// Determine whether this widget is focused.
+    pub fn is_focused(&self) -> bool {
+        self.is_focused
+    }
 }
 
 impl WinHandler for UiMain {
@@ -881,11 +911,11 @@ impl WinHandler for UiMain {
         state.dispatch_events();
     }
 
-    fn paint(&self, paint_ctx: &mut piet_common::Piet) -> bool {
+    fn paint(&self, paint_ctx: &mut Piet) -> bool {
         let mut state = self.state.borrow_mut();
         state.anim_frame();
         {
-            paint_ctx.clear(0x272822);
+            paint_ctx.clear(BACKGROUND_COLOR);
         }
         let root = state.graph.root;
         let bc = BoxConstraints::tight(state.inner.layout_ctx.size);
@@ -909,62 +939,62 @@ impl WinHandler for UiMain {
         state.handle_command(id);
     }
 
-    fn char(&self, ch: u32, mods: u32) {
-        if let Some(ch) = char::from_u32(ch) {
-            let key_event = KeyEvent {
-                key: KeyVariant::Char(ch),
-                mods,
-            };
-            let mut state = self.state.borrow_mut();
-            state.handle_key_event(&key_event);
-        } else {
-            println!("invalid code point 0x{:x}", ch);
-        }
+    fn key_down(&self, event: KeyEvent) -> bool {
+        let mut state = self.state.borrow_mut();
+        state.handle_key_down(&event)
     }
 
-    fn keydown(&self, vk_code: i32, mods: u32) -> bool {
-        let key_event = KeyEvent {
-            key: KeyVariant::Vkey(vk_code),
+    fn key_up(&self, event: KeyEvent) {
+        let mut state = self.state.borrow_mut();
+        state.handle_key_up(&event);
+    }
+
+    fn mouse_wheel(&self, dy: i32, mods: KeyModifiers) {
+        let mut state = self.state.borrow_mut();
+        state.handle_scroll(&window::ScrollEvent {
+            dx: 0.0,
+            dy: dy as f64,
             mods,
-        };
+        });
+    }
+
+    fn mouse_hwheel(&self, dx: i32, mods: KeyModifiers) {
         let mut state = self.state.borrow_mut();
-        state.handle_key_event(&key_event)
+        state.handle_scroll(&window::ScrollEvent {
+            dx: dx as f64,
+            dy: 0.0,
+            mods,
+        });
     }
 
-    fn mouse_wheel(&self, delta: i32, mods: u32) {
-        println!("mouse_wheel {} {:02x}", delta, mods);
-    }
-
-    fn mouse_hwheel(&self, delta: i32, mods: u32) {
-        println!("mouse_hwheel {} {:02x}", delta, mods);
-    }
-
-    fn mouse_move(&self, x: i32, y: i32, _mods: u32) {
+    fn mouse_move(&self, event: &window::MouseEvent) {
         let mut state = self.state.borrow_mut();
-        let (x, y) = state.layout_ctx.handle.pixels_to_px_xy(x, y);
-        state.mouse_move(x, y);
+        let (x, y) = state.layout_ctx.handle.pixels_to_px_xy(event.x, event.y);
+        let pos = Point::new(x as f64, y as f64);
+        state.mouse_move(pos);
     }
 
     fn mouse(&self, event: &window::MouseEvent) {
         //println!("mouse {:?}", event);
         let mut state = self.state.borrow_mut();
         let (x, y) = state.layout_ctx.handle.pixels_to_px_xy(event.x, event.y);
+        let pos = Point::new(x as f64, y as f64);
         // TODO: detect multiple clicks and pass that down
-        state.mouse(x, y, event);
+        state.mouse(pos, event);
     }
 
     fn destroy(&self) {
         Application::quit();
     }
 
-    fn as_any(&self) -> &Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn size(&self, width: u32, height: u32) {
         let mut state = self.state.borrow_mut();
-        let dpi = state.layout_ctx.handle.get_dpi();
+        let dpi = state.layout_ctx.handle.get_dpi() as f64;
         let scale = 96.0 / dpi;
-        state.inner.layout_ctx.size = (width as f32 * scale, height as f32 * scale);
+        state.inner.layout_ctx.size = Size::new(width as f64 * scale, height as f64 * scale);
     }
 }

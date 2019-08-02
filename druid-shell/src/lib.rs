@@ -14,23 +14,16 @@
 
 //! Platform abstraction for druid toolkit.
 
+pub use piet_common as piet;
+pub use piet_common::kurbo;
+
 #[cfg(target_os = "windows")]
 #[macro_use]
 extern crate winapi;
-#[cfg(target_os = "windows")]
-extern crate direct2d;
-#[cfg(target_os = "windows")]
-extern crate wio;
 
-#[cfg(target_os = "macos")]
-extern crate cocoa;
-#[cfg(target_os = "macos")]
-extern crate core_graphics;
 #[cfg(target_os = "macos")]
 #[macro_use]
 extern crate objc;
-#[cfg(target_os = "macos")]
-extern crate cairo;
 
 #[cfg(target_os = "linux")]
 extern crate cairo;
@@ -46,10 +39,8 @@ extern crate glib;
 #[macro_use]
 extern crate lazy_static;
 
-extern crate piet;
-extern crate piet_common;
-
 pub mod error;
+pub mod keyboard;
 pub mod keycodes;
 pub mod window;
 
@@ -57,9 +48,6 @@ pub mod window;
 pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows as platform;
-
-#[cfg(target_os = "windows")]
-use windows::dcomp;
 #[cfg(target_os = "windows")]
 pub use windows::paint;
 
@@ -79,5 +67,6 @@ pub use platform::application;
 pub use platform::dialog;
 pub use platform::menu;
 pub use platform::util;
-pub use platform::win_main; // TODO: rename to "runloop"
+pub use platform::win_main as runloop; // TODO: rename to "runloop"
+pub use platform::WindowBuilder;
 pub use util::init;

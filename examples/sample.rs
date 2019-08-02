@@ -14,26 +14,20 @@
 
 //! Sample GUI app.
 
-extern crate druid;
-extern crate druid_shell;
-extern crate kurbo;
-extern crate piet;
+use druid::kurbo::{Line, Rect, Size};
+use druid::piet::{Color, RenderContext};
 
-use kurbo::Line;
-use piet::RenderContext;
+use druid::shell::keycodes::MenuKey;
+use druid::shell::menu::Menu;
+use druid::shell::{runloop, WindowBuilder};
 
-use druid_shell::menu::Menu;
-use druid_shell::win_main;
-use druid_shell::platform::WindowBuilder;
+use druid::widget::{Button, Padding, Row, Widget};
+use druid::{
+    BoxConstraints, FileDialogOptions, FileDialogType, Id, LayoutCtx, LayoutResult, PaintCtx, Ui,
+    UiMain, UiState,
+};
 
-use druid::widget::{Button, Padding, Row};
-use druid::{FileDialogOptions, FileDialogType};
-use druid::{Ui, UiMain, UiState};
-
-use druid::widget::Widget;
-use druid::{BoxConstraints, Geometry, LayoutResult};
-use druid::{Id, LayoutCtx, PaintCtx};
-
+const STROKECOLOR: Color = Color::rgb24(0xfb_f8_ef);
 const COMMAND_EXIT: u32 = 0x100;
 const COMMAND_OPEN: u32 = 0x101;
 
@@ -41,28 +35,21 @@ const COMMAND_OPEN: u32 = 0x101;
 struct FooWidget;
 
 impl Widget for FooWidget {
-    fn paint(&mut self, paint_ctx: &mut PaintCtx, geom: &Geometry) {
-        let fg = paint_ctx.render_ctx.solid_brush(0xf0f0eaff).unwrap();
-
-        let (x, y) = geom.pos;
-        paint_ctx
-            .render_ctx
-            .stroke(
-                Line::new(
-                    (x as f64, y as f64),
-                    (x as f64 + geom.size.0 as f64, y as f64 + geom.size.1 as f64),
-                ),
-                &fg,
-                1.0,
-                None,
-            );
+    fn paint(&mut self, paint_ctx: &mut PaintCtx, geom: &Rect) {
+        let fg = paint_ctx.render_ctx.solid_brush(STROKECOLOR);
+        paint_ctx.render_ctx.stroke(
+            Line::new(geom.origin(), geom.origin() + geom.size().to_vec2()),
+            &fg,
+            1.0,
+            None,
+        );
     }
 
     fn layout(
         &mut self,
         bc: &BoxConstraints,
         _children: &[Id],
-        _size: Option<(f32, f32)>,
+        _size: Option<Size>,
         _ctx: &mut LayoutCtx,
     ) -> LayoutResult {
         LayoutResult::Size(bc.constrain((100.0, 100.0)))
@@ -79,12 +66,12 @@ fn main() {
     druid_shell::init();
 
     let mut file_menu = Menu::new();
-    file_menu.add_item(COMMAND_EXIT, "E&xit");
-    file_menu.add_item(COMMAND_OPEN, "O&pen");
+    file_menu.add_item(COMMAND_EXIT, "E&xit", MenuKey::std_quit());
+    file_menu.add_item(COMMAND_OPEN, "O&pen", 'o');
     let mut menubar = Menu::new();
     menubar.add_dropdown(file_menu, "&File");
 
-    let mut run_loop = win_main::RunLoop::new();
+    let mut run_loop = runloop::RunLoop::new();
     let mut builder = WindowBuilder::new();
     let mut state = UiState::new();
     let foo1 = FooWidget.ui(&mut state);

@@ -52,15 +52,16 @@ use direct2d;
 use direct2d::math::SizeU;
 use direct2d::render_target::{GenericRenderTarget, HwndRenderTarget, RenderTarget};
 
-use piet::RenderContext;
+use piet_common::{Piet, RenderContext};
 
+use crate::menu::Menu;
+use crate::util::{as_result, FromWide, ToWide, OPTIONAL_FUNCTIONS};
+use crate::Error;
 use dcomp::{D3D11Device, DCompositionDevice, DCompositionTarget, DCompositionVisual};
 use dialog::{get_file_dialog_path, FileDialogOptions, FileDialogType};
-use menu::Menu;
-use util::{as_result, FromWide, ToWide, OPTIONAL_FUNCTIONS};
-use Error;
 
-use window::{self, Cursor, MouseButton, MouseEvent, MouseType, WinHandler};
+use crate::keyboard::{KeyCode, KeyEvent, KeyModifiers};
+use crate::window::{self, Cursor, MouseButton, MouseEvent, WinHandler};
 
 extern "system" {
     pub fn DwmFlush();
@@ -68,7 +69,7 @@ extern "system" {
 
 /// Builder abstraction for creating new windows.
 pub struct WindowBuilder {
-    handler: Option<Box<WinHandler>>,
+    handler: Option<Box<dyn WinHandler>>,
     dwStyle: DWORD,
     title: String,
     cursor: Cursor,
@@ -113,15 +114,15 @@ pub struct WindowHandle(Weak<WindowState>);
 #[derive(Clone)]
 pub struct IdleHandle {
     pub(crate) hwnd: HWND,
-    queue: Arc<Mutex<Vec<Box<IdleCallback>>>>,
+    queue: Arc<Mutex<Vec<Box<dyn IdleCallback>>>>,
 }
 
 trait IdleCallback: Send {
-    fn call(self: Box<Self>, a: &Any);
+    fn call(self: Box<Self>, a: &dyn Any);
 }
 
-impl<F: FnOnce(&Any) + Send> IdleCallback for F {
-    fn call(self: Box<F>, a: &Any) {
+impl<F: FnOnce(&dyn Any) + Send> IdleCallback for F {
+    fn call(self: Box<F>, a: &dyn Any) {
         (*self)(a)
     }
 }
@@ -129,8 +130,8 @@ impl<F: FnOnce(&Any) + Send> IdleCallback for F {
 struct WindowState {
     hwnd: Cell<HWND>,
     dpi: Cell<f32>,
-    wndproc: Box<WndProc>,
-    idle_queue: Arc<Mutex<Vec<Box<IdleCallback>>>>,
+    wndproc: Box<dyn WndProc>,
+    idle_queue: Arc<Mutex<Vec<Box<dyn IdleCallback>>>>,
 }
 
 /// Generic handler trait for the winapi window procedure entry point.
@@ -144,7 +145,7 @@ trait WndProc {
 // State and logic for the winapi window procedure entry point. Note that this level
 // implements policies such as the use of Direct2D for painting.
 struct MyWndProc {
-    handler: Box<WinHandler>,
+    handler: Box<dyn WinHandler>,
     handle: RefCell<WindowHandle>,
     d2d_factory: direct2d::Factory,
     dwrite_factory: directwrite::Factory,
@@ -155,6 +156,13 @@ struct WndState {
     render_target: Option<GenericRenderTarget>,
     dcomp_state: Option<DCompState>,
     dpi: f32,
+    /// The `KeyCode` of the last `WM_KEYDOWN` event. We stash this so we can
+    /// include it when handling `WM_CHAR` events.
+    stashed_key_code: KeyCode,
+    /// The `char` of the last `WM_CHAR` event, if there has not already been
+    /// a `WM_KEYUP` event.
+    stashed_char: Option<char>,
+    //TODO: track surrogate orphan
 }
 
 /// State for DirectComposition. This is optional because it is only supported
@@ -179,17 +187,20 @@ impl Default for PresentStrategy {
     }
 }
 
-fn get_mod_state(lparam: LPARAM) -> u32 {
+/// Must only be called while handling an input message.
+/// This queries the keyboard state at the time of message delivery.
+fn get_mod_state() -> KeyModifiers {
+    //FIXME: does not handle windows key
     unsafe {
-        let mut mod_state = 0;
-        if (lparam & (1 << 29)) != 0 {
-            mod_state |= MOD_ALT as u32;
+        let mut mod_state = KeyModifiers::default();
+        if GetKeyState(VK_MENU) < 0 {
+            mod_state.alt = true;
         }
         if GetKeyState(VK_CONTROL) < 0 {
-            mod_state |= MOD_CONTROL as u32;
+            mod_state.ctrl = true;
         }
         if GetKeyState(VK_SHIFT) < 0 {
-            mod_state |= MOD_SHIFT as u32;
+            mod_state.shift = true;
         }
         mod_state
     }
@@ -215,11 +226,7 @@ impl MyWndProc {
         rt.begin_draw();
         let anim;
         {
-            let mut piet_ctx = piet_common::Piet::new(
-                &self.d2d_factory,
-                &self.dwrite_factory,
-                rt,
-            );
+            let mut piet_ctx = Piet::new(&self.d2d_factory, &self.dwrite_factory, rt);
             anim = self.handler.paint(&mut piet_ctx);
             if let Err(e) = piet_ctx.finish() {
                 // TODO: use proper log infrastructure
@@ -323,7 +330,7 @@ impl WndProc for MyWndProc {
                         self.rebuild_render_target();
                         self.render();
                         let mut state = self.state.borrow_mut();
-                        let mut s = state.as_mut().unwrap();
+                        let s = state.as_mut().unwrap();
                         (*s.dcomp_state.as_ref().unwrap().swap_chain).Present(0, 0);
                     } else {
                         println!("ResizeBuffers failed: 0x{:x}", res);
@@ -334,7 +341,7 @@ impl WndProc for MyWndProc {
                     DwmFlush();
 
                     let mut state = self.state.borrow_mut();
-                    let mut s = state.as_mut().unwrap();
+                    let s = state.as_mut().unwrap();
                     if let Some(ref mut ds) = s.dcomp_state {
                         let _ = ds.dcomp_target.set_root(&mut ds.swapchain_visual);
                         let _ = ds.dcomp_device.commit();
@@ -356,7 +363,7 @@ impl WndProc for MyWndProc {
                 };
                 if use_hwnd {
                     let mut state = self.state.borrow_mut();
-                    let mut s = state.as_mut().unwrap();
+                    let s = state.as_mut().unwrap();
                     if let Some(ref mut rt) = s.render_target {
                         if let Some(hrt) = cast_to_hwnd(rt) {
                             let width = LOWORD(lparam as u32) as u32;
@@ -384,7 +391,7 @@ impl WndProc for MyWndProc {
                         self.rebuild_render_target();
                         self.render();
                         let mut state = self.state.borrow_mut();
-                        let mut s = state.as_mut().unwrap();
+                        let s = state.as_mut().unwrap();
                         if let Some(ref mut dcomp_state) = s.dcomp_state {
                             (*dcomp_state.swap_chain).Present(0, 0);
                             let _ = dcomp_state.dcomp_device.commit();
@@ -401,36 +408,97 @@ impl WndProc for MyWndProc {
                 Some(0)
             }
             WM_CHAR => {
-                let mods = get_mod_state(lparam);
-                self.handler.char(wparam as u32, mods);
-                Some(0)
-            }
-            WM_KEYDOWN | WM_SYSKEYDOWN => {
-                let mods = get_mod_state(lparam);
-                let handled = self.handler.keydown(wparam as i32, mods);
-                if handled {
+                let mut state = self.state.borrow_mut();
+                let mut s = state.as_mut().unwrap();
+                //FIXME: this can receive lone surrogate pairs?
+                let key_code = s.stashed_key_code;
+                s.stashed_char = std::char::from_u32(wparam as u32);
+                let text = match s.stashed_char {
+                    Some(c) => c,
+                    None => {
+                        eprintln!("failed to convert WM_CHAR to char: {:#X}", wparam);
+                        return None;
+                    }
+                };
+
+                let modifiers = get_mod_state();
+                let is_repeat = (lparam & 0xFFFF) > 0;
+                let event = KeyEvent::new(key_code, is_repeat, modifiers, text, text);
+
+                if self.handler.key_down(event) {
                     Some(0)
                 } else {
                     None
                 }
             }
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
+                let mut state = self.state.borrow_mut();
+                let mut s = state.as_mut().unwrap();
+                let key_code: KeyCode = (wparam as i32).into();
+                s.stashed_key_code = key_code;
+                if key_code.is_printable() {
+                    //FIXME: this will fail to propogate key combinations such as alt+s
+                    return None;
+                }
+
+                let modifiers = get_mod_state();
+                // bits 0-15 of iparam are the repeat count:
+                // https://docs.microsoft.com/en-ca/windows/desktop/inputdev/wm-keydown
+                let is_repeat = (lparam & 0xFFFF) > 0;
+                let event = KeyEvent::new(key_code, is_repeat, modifiers, "", "");
+
+                if self.handler.key_down(event) {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+            WM_KEYUP => {
+                let mut state = self.state.borrow_mut();
+                let s = state.as_mut().unwrap();
+                let key_code: KeyCode = (wparam as i32).into();
+                let modifiers = get_mod_state();
+                let is_repeat = false;
+                let text = s.stashed_char.take();
+                let event = KeyEvent::new(key_code, is_repeat, modifiers, text, text);
+                self.handler.key_up(event);
+                Some(0)
+            }
+            //TODO: WM_SYSCOMMAND
             WM_MOUSEWHEEL => {
                 let delta = HIWORD(wparam as u32) as i16 as i32;
-                let mods = LOWORD(wparam as u32) as u32;
+                let mods = get_mod_state();
                 self.handler.mouse_wheel(delta, mods);
                 Some(0)
             }
             WM_MOUSEHWHEEL => {
                 let delta = HIWORD(wparam as u32) as i16 as i32;
-                let mods = LOWORD(wparam as u32) as u32;
+                let mods = get_mod_state();
                 self.handler.mouse_hwheel(delta, mods);
                 Some(0)
             }
             WM_MOUSEMOVE => {
                 let x = LOWORD(lparam as u32) as i16 as i32;
                 let y = HIWORD(lparam as u32) as i16 as i32;
-                let mods = LOWORD(wparam as u32) as u32;
-                self.handler.mouse_move(x, y, mods);
+                let mods = get_mod_state();
+                let button = match wparam {
+                    w if (w & 1) > 0 => MouseButton::Left,
+                    w if (w & 1 << 1) > 0 => MouseButton::Right,
+                    w if (w & 1 << 5) > 0 => MouseButton::Middle,
+                    w if (w & 1 << 6) > 0 => MouseButton::X1,
+                    w if (w & 1 << 7) > 0 => MouseButton::X2,
+                    //FIXME: I guess we probably do want `MouseButton::None`?
+                    //this feels bad, but also this gets discarded in druid anyway.
+                    _ => MouseButton::Left,
+                };
+                let event = MouseEvent {
+                    x,
+                    y,
+                    mods,
+                    button,
+                    count: 0,
+                };
+                self.handler.mouse_move(&event);
                 Some(0)
             }
             // TODO: not clear where double-click processing should happen. Currently disabled
@@ -438,7 +506,7 @@ impl WndProc for MyWndProc {
             WM_LBUTTONDBLCLK | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MBUTTONDBLCLK
             | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_RBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP
             | WM_XBUTTONDBLCLK | WM_XBUTTONDOWN | WM_XBUTTONUP => {
-                let which = match msg {
+                let button = match msg {
                     WM_LBUTTONDBLCLK | WM_LBUTTONDOWN | WM_LBUTTONUP => MouseButton::Left,
                     WM_MBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONUP => MouseButton::Middle,
                     WM_RBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP => MouseButton::Right,
@@ -453,25 +521,21 @@ impl WndProc for MyWndProc {
                     },
                     _ => unreachable!(),
                 };
-                let ty = match msg {
-                    WM_LBUTTONDOWN | WM_MBUTTONDOWN | WM_RBUTTONDOWN | WM_XBUTTONDOWN => {
-                        MouseType::Down
-                    }
-                    WM_LBUTTONDBLCLK | WM_MBUTTONDBLCLK | WM_RBUTTONDBLCLK | WM_XBUTTONDBLCLK => {
-                        MouseType::DoubleClick
-                    }
-                    WM_LBUTTONUP | WM_MBUTTONUP | WM_RBUTTONUP | WM_XBUTTONUP => MouseType::Up,
+                let count = match msg {
+                    WM_LBUTTONDOWN | WM_MBUTTONDOWN | WM_RBUTTONDOWN | WM_XBUTTONDOWN => 1,
+                    WM_LBUTTONDBLCLK | WM_MBUTTONDBLCLK | WM_RBUTTONDBLCLK | WM_XBUTTONDBLCLK => 2,
+                    WM_LBUTTONUP | WM_MBUTTONUP | WM_RBUTTONUP | WM_XBUTTONUP => 0,
                     _ => unreachable!(),
                 };
                 let x = LOWORD(lparam as u32) as i16 as i32;
                 let y = HIWORD(lparam as u32) as i16 as i32;
-                let mods = LOWORD(wparam as u32) as u32;
+                let mods = get_mod_state();
                 let event = MouseEvent {
                     x,
                     y,
                     mods,
-                    which,
-                    ty,
+                    button,
+                    count,
                 };
                 self.handler.mouse(&event);
                 Some(0)
@@ -506,7 +570,7 @@ impl WindowBuilder {
     }
 
     /// This takes ownership, and is typically used with UiMain
-    pub fn set_handler(&mut self, handler: Box<WinHandler>) {
+    pub fn set_handler(&mut self, handler: Box<dyn WinHandler>) {
         self.handler = Some(handler);
     }
 
@@ -630,6 +694,8 @@ impl WindowBuilder {
                 render_target: None,
                 dcomp_state,
                 dpi,
+                stashed_key_code: KeyCode::Unknown(0.into()),
+                stashed_char: None,
             };
             win.wndproc.connect(&handle, state);
             mem::drop(win);
@@ -862,7 +928,7 @@ impl WindowHandle {
         })
     }
 
-    fn take_idle_queue(&self) -> Vec<Box<IdleCallback>> {
+    fn take_idle_queue(&self) -> Vec<Box<dyn IdleCallback>> {
         if let Some(w) = self.0.upgrade() {
             mem::replace(&mut w.idle_queue.lock().unwrap(), Vec::new())
         } else {
@@ -911,7 +977,7 @@ impl IdleHandle {
     /// which means it won't be scheduled if the window is closed.
     pub fn add_idle<F>(&self, callback: F)
     where
-        F: FnOnce(&Any) + Send + 'static,
+        F: FnOnce(&dyn Any) + Send + 'static,
     {
         let mut queue = self.queue.lock().unwrap();
         if queue.is_empty() {

@@ -17,7 +17,8 @@
 use std::any::Any;
 use std::ops::Deref;
 
-use platform;
+use crate::keyboard::{KeyEvent, KeyModifiers};
+use crate::platform;
 
 // Handle to Window Level Utilities
 #[derive(Clone, Default)]
@@ -61,25 +62,18 @@ pub trait WinHandler {
     /// Called when a menu item is selected.
     fn command(&self, id: u32) {}
 
-    /// Called on keyboard input of a single character. This corresponds
-    /// to the WM_CHAR message. Handling of text input will continue to
-    /// evolve, we need to handle input methods and more.
-    ///
-    /// The modifiers are a combination of `M_ALT`, `M_CTRL`, `M_SHIFT`.
-    #[allow(unused_variables)]
-    fn char(&self, ch: u32, mods: u32) {}
-
-    /// Called on a key down event. This corresponds to the WM_KEYDOWN
-    /// message. The key code is as WM_KEYDOWN. We'll want to add stuff
-    /// like the modifier state.
-    ///
-    /// The modifiers are a combination of `M_ALT`, `M_CTRL`, `M_SHIFT`.
+    /// Called on a key down event.
     ///
     /// Return `true` if the event is handled.
     #[allow(unused_variables)]
-    fn keydown(&self, vkey_code: i32, mods: u32) -> bool {
+    fn key_down(&self, event: KeyEvent) -> bool {
         false
     }
+
+    /// Called when a key is released. This corresponds to the WM_KEYUP message
+    /// on Windows, or keyUp(withEvent:) on macOS.
+    #[allow(unused_variables)]
+    fn key_up(&self, event: KeyEvent) {}
 
     /// Called on a mouse wheel event. This corresponds to a
     /// [WM_MOUSEWHEEL](https://msdn.microsoft.com/en-us/library/windows/desktop/ms645617(v=vs.85).aspx)
@@ -87,7 +81,7 @@ pub trait WinHandler {
     ///
     /// The modifiers are the same as WM_MOUSEWHEEL.
     #[allow(unused_variables)]
-    fn mouse_wheel(&self, delta: i32, mods: u32) {}
+    fn mouse_wheel(&self, delta: i32, mods: KeyModifiers) {}
 
     /// Called on a mouse horizontal wheel event. This corresponds to a
     /// [WM_MOUSEHWHEEL](https://msdn.microsoft.com/en-us/library/windows/desktop/ms645614(v=vs.85).aspx)
@@ -95,14 +89,14 @@ pub trait WinHandler {
     ///
     /// The modifiers are the same as WM_MOUSEHWHEEL.
     #[allow(unused_variables)]
-    fn mouse_hwheel(&self, delta: i32, mods: u32) {}
+    fn mouse_hwheel(&self, delta: i32, mods: KeyModifiers) {}
 
     /// Called when the mouse moves. Note that the x, y coordinates are
     /// in absolute pixels.
     ///
     /// TODO: should we reuse the MouseEvent struct for this method as well?
     #[allow(unused_variables)]
-    fn mouse_move(&self, x: i32, y: i32, mods: u32) {}
+    fn mouse_move(&self, event: &MouseEvent) {}
 
     /// Called on mouse button up or down. Note that the x, y
     /// coordinates are in absolute pixels.
@@ -115,10 +109,10 @@ pub trait WinHandler {
     fn destroy(&self) {}
 
     /// Get a reference to the handler state. Used mostly by idle handlers.
-    fn as_any(&self) -> &Any;
+    fn as_any(&self) -> &dyn Any;
 }
 
-/// A mouse button press or release event.
+/// The state of the mouse for a click, mouse-up, or move event.
 #[derive(Debug)]
 pub struct MouseEvent {
     /// X coordinate in absolute pixels.
@@ -126,11 +120,13 @@ pub struct MouseEvent {
     /// Y coordinate in absolute pixels.
     pub y: i32,
     /// Modifiers, as in raw WM message
-    pub mods: u32,
-    /// Which button was pressed or released.
-    pub which: MouseButton,
-    /// Type of event.
-    pub ty: MouseType,
+    pub mods: KeyModifiers,
+    /// The number of mouse clicks associated with this event. This will always
+    /// be `0` for a mouse-up event.
+    pub count: u32,
+    /// The currently pressed button in the case of a move or click event,
+    /// or the released button in the case of a mouse-up event.
+    pub button: MouseButton,
 }
 
 /// An indicator of which mouse button was pressed.
@@ -148,20 +144,19 @@ pub enum MouseButton {
     X2,
 }
 
-/// An indicator of the state change of a mouse button.
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub enum MouseType {
-    /// Mouse down event.
-    Down,
-    /// Note: DoubleClick is currently disabled, as we don't use the
-    /// Windows processing.
-    DoubleClick,
-    /// Mouse up event.
-    Up,
-}
-
 /// Standard cursor types. This is only a subset, others can be added as needed.
 pub enum Cursor {
     Arrow,
     IBeam,
+}
+
+/// A scroll wheel event.
+#[derive(Debug)]
+pub struct ScrollEvent {
+    /// The scroll wheel’s horizontal delta.
+    pub dx: f64,
+    /// The scroll wheel’s vertical delta.
+    pub dy: f64,
+    /// Modifiers, as in raw WM message
+    pub mods: KeyModifiers,
 }

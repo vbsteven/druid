@@ -1,0 +1,12 @@
+steps:
+  - bash: |
+      export RUST_BACKTRACE=1
+      cargo +${{parameters.toolchain}} fmt --all -- --check || exit
+      cargo +${{parameters.toolchain}} check --all || exit
+      cargo +${{parameters.toolchain}} check --examples || exit
+      cargo +${{parameters.toolchain}} test --all || exit
+      cargo +${{parameters.toolchain}} test --examples || exit
+
+    workingDirectory: '$(Build.SourcesDirectory)/${{parameters.crate_path}}'
+    displayName: Run cargo check and test ${{parameters.crate_path}} on ${{parameters.toolchain}}
+
