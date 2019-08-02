@@ -228,7 +228,7 @@ pub enum KeyCode {
 pub enum RawKeyCode {
     Windows(i32),
     Mac(u16),
-    Linux(u32)
+    Linux(u32),
 }
 
 impl KeyCode {
@@ -525,8 +525,6 @@ impl From<i32> for KeyCode {
         }
     }
 }
-
-
 
 /// Should realistically be (8 * N) - 1; we need one byte for the length.
 const TINY_STR_CAPACITY: usize = 15;
